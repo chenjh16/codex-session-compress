@@ -8,7 +8,7 @@
 - 保持脚本可直接运行，不要求安装包。
 - 处理大文件时使用流式读写，不把完整 JSONL 读入内存。
 - 默认行为必须保守；删除或覆盖类操作需要明确确认。
-- 新增功能必须更新 `README.md` 和 `SKILL.md`。
+- 新增功能必须更新 `README.md`、`SKILL.md`，以及相关 `docs/` / `references/` 文档。
 - 不提交真实用户会话文件。
 
 ## 本地检查
@@ -40,6 +40,8 @@ python3 tests/test_synthetic_rollout.py
 4. 如仍有预算，再从两端保留原始 `response_item` raw-detail breadcrumb。
 5. 用一个显式 synthetic maintenance turn 表示被截去的旧历史中段：依次写入 `event_msg.task_started`、`event_msg.user_message`、`event_msg.agent_message`、`event_msg.task_complete`，并把它插入到 checkpoint 前旧历史两端 breadcrumb 中间的真实截断位置。synthetic `user_message.client_id` 必须使用 `codex-session-compress-elision-` 前缀，文案需说明它由压缩工具写入、不是原始用户指令，并按操作系统语言选择中文或英文。
 
+重新压缩已经含有旧 `codex-session-compress` synthetic marker 的 rollout 时，必须从 checkpoint 前 breadcrumb 候选中省略旧 marker 事件，并只写入本次压缩生成的一个当前四事件 synthetic maintenance turn。不要把旧 marker fragment 混入新的可见历史。
+
 没有 full compacted checkpoint 时必须失败，不允许添加图片替换、工具输出截断或旧 turn 裁剪作为替代路径。
 
 真实压缩后的完成条件包括两层验证：`verify_rollout.py` 的静态 semantic checkpoint 验证，以及 `confirm_session_with_codex_cli.py` 通过 `codex app-server --stdio` 执行的只读 `thread/read includeTurns=true` 确认。静态验证必须检查 synthetic maintenance turn 是完整连续的四事件结构；含 synthetic maintenance turn 的压缩结果必须能在 Codex 重建后的同一个可见 thread turn 中看到 synthetic `userMessage` 与 synthetic `agentMessage`。
@@ -50,12 +52,16 @@ python3 tests/test_synthetic_rollout.py
 
 - 默认必须是 dry-run。
 - 正式清理必须要求 `--apply --yes`。
-- 默认只能清理可识别为 SubAgent 的 session；普通 session 必须要求显式 `--allow-non-subagent`。
+- 默认只能清理显式请求 root 为 closed SubAgent 的 session；普通 session 必须要求显式 `--allow-non-subagent`。
+- 用户明确要求“清理超时 SubAgent”时，只能用 `--allow-timeout-subagent --timeout-hours <hours>` 放行 open/unknown root，且 canonical state DB 中父会话最后活跃时间必须至少比子会话晚对应小时数；未达到阈值的 open/unknown root 应继续拒绝。
+- `--allow-open-subagent` 是更强的人工确认开关，只能在用户明确表示这些 open/unknown 子会话可丢时使用，不应用来替代超时判定。
+- 多个 `state_*.sqlite` 对显式请求 root 的 spawn status 冲突时默认拒绝；`--allow-status-conflict` 只能在 dry-run 已确认冲突来自 stale secondary state DB 且用户明确要求继续清理时使用。
 - cleanup tree 必须来自 canonical state DB；secondary state DB 只能用于诊断 stale descendant candidates。
 - `--apply` 的 running Codex guard 必须按目标 Codex home 判断，并尽量读取进程环境中的 `CODEX_HOME`；未声明 home 的 Codex 进程按默认 `~/.codex` 处理，不应把当前脚本自身的 `CODEX_HOME` 套用到所有 Codex 进程。
 - 如果 job runner 和 worker 都在 cleanup IDs 中，清理逻辑必须按 Codex 源码取消相关 `agent_jobs`。
-- 删除 rollout、`*.jsonl.zst`、`session_index.jsonl` 或 SQLite 行之前必须备份原文件。
+- 删除 rollout、`*.jsonl.zst`、`session_index.jsonl` 或 SQLite 行之前默认必须备份原文件；只有用户明确要求“不用备份/直接清理”时，才允许通过 `--no-cleanup-backup` 执行不可逆清理。
 - SQLite 修改后必须运行完整性检查。
+- cleanup 失败恢复时必须处理 SQLite `-wal` / `-shm` sidecar：如果这些 sidecar 是本次失败中新生成的，应删除它们，避免恢复主库后留下不一致的 WAL/SHM。
 - 测试只能使用合成 JSONL 和合成 SQLite，不得读取或修改真实 `~/.codex`。
 
 ## Pull Request 建议

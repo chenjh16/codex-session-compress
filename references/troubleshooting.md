@@ -100,6 +100,24 @@ codex resume <session-id>
 
 它需要用户手动退出 Codex。不要把它当作非交互 CI 检查。如果需要完全自动化的 prompt 检查，应先获得用户确认，因为这可能追加新 turn 并消耗使用额度。
 
+## 二次压缩后 synthetic marker 校验失败
+
+可能原因：
+
+- 压缩前的旧历史中已经存在旧版 `codex-session-compress` 标记。
+- 旧标记被当作普通 breadcrumb 保留下来，但不是当前要求的完整四事件 synthetic maintenance turn。
+
+处理：
+
+1. 确认使用当前版本脚本。当前 `repair_rollout.py` 会在二次压缩时省略 checkpoint 前的旧 marker 事件。
+2. 重新压缩并查看 JSON 结果中的 `historical_compression_marker_events_omitted`。
+3. 再运行：
+
+   ```bash
+   python scripts/verify_rollout.py <rollout-path> --semantic-checkpoint --allow-active-images
+   python scripts/confirm_session_with_codex_cli.py <session-id> --require-synthetic-marker
+   ```
+
 ## 什么时候可以删除备份
 
 只有在以下条件都满足时才删除：
@@ -156,6 +174,12 @@ dry-run 会显示请求的 root IDs、canonical state DB、自动展开的 desce
 
 如果 dry-run 显示 `refused_status_conflict`，说明多个 `state_*.sqlite` 对显式请求 root 的 spawn edge 状态不一致。不要直接 `--apply`；先确认 Codex 是否仍在运行、是否存在旧 state DB，再决定是否手动指定状态目录或清理旧库。
 
+只有确认冲突来自 stale secondary state DB，且用户明确要求继续清理这些 SubAgent 时，才追加：
+
+```bash
+python scripts/cleanup_session_by_id.py <session-id> --allow-status-conflict --apply --yes
+```
+
 如果 `--apply` 报 Codex 仍在运行，推荐关闭使用目标 Codex home 的 Codex 后重试。脚本会尽量读取进程环境中的 `CODEX_HOME`；未声明 home 的 Codex 进程会按默认 `~/.codex` 处理。只有确认目标 session、父会话和 state DB 不会被活跃进程改写时，才使用：
 
 ```bash
@@ -173,6 +197,17 @@ python scripts/cleanup_session_by_id.py <session-id> --allow-non-subagent --appl
 ```bash
 python scripts/cleanup_session_by_id.py <session-id> --allow-open-subagent --apply --yes
 ```
+
+如果用户说“清理超时 SubAgent”，应先用超时规则而不是直接放开 open/unknown：
+
+```bash
+python scripts/cleanup_session_by_id.py <subagent-id...> \
+  --allow-timeout-subagent \
+  --timeout-hours 12 \
+  --json
+```
+
+dry-run 中 `plan.sessions[*].timeout_subagent` 会列出父会话、父/子 last-active 时间和相差小时数。正式执行时只清理非 refused 的 ID；未达到阈值的 open/unknown SubAgent 应继续保留。
 
 清理前建议关闭 Codex。清理后如果 App 仍显示旧条目，重启 Codex 让列表重新读取本地文件和 SQLite 状态。
 

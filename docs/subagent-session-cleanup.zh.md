@@ -21,6 +21,8 @@ commit d2885dc3cdbaf98a60e7256ec3e7dfdf2381041d
 
 `thread_spawn_edges.status = closed` 只能说明 Codex 本地 spawn edge 生命周期已经关闭；它不能证明子 Agent 的结论已经完整写回父会话，也不能代表用户以后一定不需要打开子会话。因此脚本默认只允许用户显式请求 closed SubAgent root，但仍要求用户确认 dry-run 计划。root 允许后，descendants 会作为该 root subtree 的一部分一起清理，即使某个 descendant edge 状态为 open。
 
+“超时 SubAgent”是一个额外的保守清理分类：如果 root SubAgent 仍是 open/unknown，但 canonical `state_*.sqlite.threads` 中父会话最后活跃时间比子会话最后活跃时间至少晚 12 小时，则说明父会话已经明显继续推进，而该子会话长期没有更新。用户明确要求“清理超时 SubAgent”时，可以把这类子会话和 closed SubAgent 一起列入清理对象；未达到阈值的 open/unknown SubAgent 仍应保留。
+
 脚本会选择最新且实际提到 requested root 的 `state_*.sqlite` 作为 canonical cleanup source，并只用这个 DB 展开实际 cleanup tree。其它 state DB 只做诊断；如果它们看到额外 descendants，会列入 `stale_spawn_descendant_candidates`，不会静默加入 cleanup IDs。若多个 `state_*.sqlite` 对同一个显式请求 root 报告冲突状态，例如一个 DB 显示 `closed`、另一个显示 `open`，脚本会拒绝清理并在 dry-run 中列出来源。正式 `--apply` 前，脚本还会检测 Codex App / `codex` CLI 是否看起来正在使用目标 Codex home；默认拒绝，除非用户显式传 `--allow-running-codex`。在 macOS/Linux 上脚本会尽量读取进程环境中的 `CODEX_HOME`；未声明 home 的 Codex 进程按默认 `~/.codex` 处理。
 
 ## 适用条件
@@ -35,7 +37,7 @@ commit d2885dc3cdbaf98a60e7256ec3e7dfdf2381041d
 不建议清理：
 
 - 子 Agent 仍在运行。
-- dry-run 显示 `status=open` 或 `status=unknown`，除非用户明确确认并使用 `--allow-open-subagent`。
+- dry-run 显示 `status=open` 或 `status=unknown`，且没有通过 `--allow-timeout-subagent --timeout-hours 12` 的超时判定，除非用户更强地明确确认并使用 `--allow-open-subagent`。
 - 父会话仍需要继续等待或 resume 这个子 Agent 或其 descendants。
 - 用户还想从 Codex App 中打开该 root 或 descendants 查看完整历史。
 - 无法确认目标 ID 是否为 SubAgent。
@@ -93,6 +95,25 @@ python scripts/cleanup_session_by_id.py <id-1> <id-2> <id-3> --apply --yes
 ```bash
 python scripts/cleanup_session_by_id.py <session-id> --allow-open-subagent --apply --yes
 ```
+
+如果用户要求清理“超时 SubAgent”，先对候选 SubAgent 做 dry-run：
+
+```bash
+python scripts/cleanup_session_by_id.py <subagent-id...> \
+  --allow-timeout-subagent \
+  --timeout-hours 12 \
+  --json
+```
+
+`plan.sessions[*].timeout_subagent` 会列出父会话 ID、父标题、子会话最后活跃时间、父会话最后活跃时间和相差小时数。正式 apply 时只传入 dry-run 中非 refused 的 ID；不要为超时清理使用 `--allow-open-subagent`，这样未达到超时阈值的 open/unknown SubAgent 会继续被保护。
+
+如果 dry-run 显示显式请求 root 在多个 state DB 中存在 spawn status 冲突，默认不要清理。只有确认冲突来自 stale secondary state DB，并且用户明确要求继续清理这些 SubAgent 时，才使用：
+
+```bash
+python scripts/cleanup_session_by_id.py <session-id> --allow-status-conflict --apply --yes
+```
+
+`--allow-status-conflict` 只解除 requested root 的冲突保护；实际 cleanup tree 仍只来自 canonical state DB，不会把 secondary state DB 中额外看到的 stale descendants 加入删除范围。
 
 如果用户明确要在目标 Codex home 可能仍被 Codex 使用时清理：
 

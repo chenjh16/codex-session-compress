@@ -186,6 +186,16 @@ mandatory suffix
 
 synthetic maintenance turn 必须保持完整连续的四行结构，并且必须位于最新 full checkpoint 之前。`event_msg.user_message` 在 Codex 源码中会被当作用户 turn boundary，因此验证器必须拒绝任何出现在最新 full checkpoint 之后的 synthetic compression marker，也必须拒绝缺少 `task_started -> user_message -> agent_message -> task_complete` 任一环节或 ID 不一致的 synthetic turn，避免 synthetic user_message 进入 active suffix。正常 resume 仍以最新 full `CompactedItem.replacement_history` 和其后的 `rollout_suffix` 为模型历史基底。
 
+### 二次压缩与旧 marker
+
+已经压缩过的 rollout 可能在 newest full checkpoint 前包含旧版或上一轮 `codex-session-compress` marker。当前策略要求：
+
+1. 旧 marker 事件不进入 optional historical breadcrumb 预算。
+2. 输出只包含本次压缩生成的一个当前 synthetic maintenance turn。
+3. JSON 结果用 `historical_compression_marker_events_omitted` 报告被省略的旧 marker 事件数量。
+
+这样可以避免旧三事件 marker、缺少 `task_complete` 的历史 marker，或被两端 breadcrumb 选择拆碎的 marker fragment 破坏当前 verifier 对“四事件连续结构”的要求。
+
 ## 验证策略
 
 旧 verifier 的“无图片残留”规则不适合 semantic checkpoint cut，因为 latest full checkpoint 的 `replacement_history` 与 active suffix 中的图片都可能是后续模型上下文的一部分。
@@ -210,6 +220,7 @@ python scripts/verify_rollout.py <rollout> \
 6. active suffix 中的 `function_call` / `function_call_output` `call_id` 状态会被报告；普通缺失 output 或孤儿 output 不再阻断，因为 Codex 源码中的 `normalize_history` 会在模型输入前插入 `aborted` output 或移除孤儿 output。
 7. 使用 semantic compression 时，图片如果位于 latest full checkpoint、active suffix 或预算内保留下来的 historical breadcrumb（`event_msg` / `turn_context` / `response_item`），允许保留并报告数量；其它位置的图片仍然失败。
 8. synthetic compression marker 必须位于最新 full checkpoint 之前，避免 synthetic `userMessage` 进入 active suffix。
+9. 如果是二次压缩，旧 `codex-session-compress` marker 应被省略；压缩结果只应包含本次 elision 对应的当前四事件 synthetic maintenance turn。
 
 需要机器可读结果时可追加：
 

@@ -4,7 +4,7 @@
 
 **Shrink oversized Codex session JSONL files while preserving Agent resume context.**
 
-[![Version](https://img.shields.io/badge/version-1.8.19-blue.svg)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.8.22-blue.svg)](./CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.8%2B-3776AB.svg)](./pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Stdlib only](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey.svg)](./pyproject.toml)
@@ -129,7 +129,7 @@ flowchart LR
 - `list_rollouts.py`：按大小列出本地 Codex rollout JSONL，默认显示前 10 个。
 - `compress_session_by_id.py`：通过 session ID 自动定位 rollout、压缩、验证，并保留备份。
 - `cleanup_compression_backups.py`：在用户确认压缩结果正常后，dry-run 或删除 `rollout-*.jsonl.orig*` 压缩备份。
-- `cleanup_session_by_id.py`：通过 root session ID 预览并清理已完成 SubAgent 及其 spawned descendants 的 rollout、索引和本地 SQLite 状态，默认创建 cleanup 备份，也支持用户明确确认后的直删模式。
+- `cleanup_session_by_id.py`：通过 root session ID 预览并清理 closed SubAgent、用户明确要求的超时 SubAgent 及其 spawned descendants 的 rollout、索引和本地 SQLite 状态，默认创建 cleanup 备份，也支持用户明确确认后的直删模式。
 - `restore_cleanup_manifest.py`：根据 cleanup manifest dry-run 或恢复一次已应用的 SubAgent 清理。
 - `verify_rollout.py`：静态验证压缩后的 JSONL 是否保留必要 checkpoint、是否可安全加载。
 - `confirm_session_with_codex_cli.py`：通过 `codex app-server --stdio` 的只读 `thread/read includeTurns=true` 确认压缩后会话可被 Codex CLI/App 重建。
@@ -160,6 +160,7 @@ Codex 本地会话通常保存在：
   3. 用 `GOAL_SIZE` 剩余预算，优先从旧历史两端交替保留 App 可重建聊天流所需的原始 `event_msg`，并把 checkpoint 前的 `turn_context` 放在同一 UI breadcrumb 优先级中尽量保留，让 Codex App 和 `codex resume` 在预算允许时仍可上翻旧聊天。
   4. 如果还有预算，再从旧历史两端交替保留原始 `response_item` breadcrumb，包括消息、reasoning、工具调用、工具输出和带图片的 response item。
   5. 用一个极小的显式 synthetic maintenance turn 表示被截去的历史中段；它由四条带顶层 `timestamp` 的合法 `RolloutLine` 组成：`event_msg.task_started`、`event_msg.user_message`、`event_msg.agent_message`、`event_msg.task_complete`。它会放在 checkpoint 前旧历史两端 breadcrumb 中间的真实截断位置。`user_message.client_id` 使用 `codex-session-compress-elision-` 前缀，并明确说明该用户气泡由压缩工具写入、不是原始用户指令；注入文案会优先按操作系统语言显示，中文系统用中文，其它语言默认英文。
+- 重新压缩已经含有旧 `codex-session-compress` synthetic marker 的 rollout 时，checkpoint 前的旧 marker 事件会从 breadcrumb 预算中省略；输出只保留本次压缩生成的当前四事件 synthetic maintenance turn，避免遗留或旧格式 marker 被拆碎后影响验证。
 - 如果没有 full compacted checkpoint，脚本会拒绝修改文件；请先在 Codex 中执行 `/compact`，让 rollout 产生可验证的 `replacement_history`。
 - 压缩后自动运行 `verify_rollout.py`。
 - 静态验证成功后，默认继续运行 `confirm_session_with_codex_cli.py`，通过 `codex app-server --stdio` 发起只读 `thread/read includeTurns=true`，确认 Codex 自己能重建该 thread history；如果压缩注入了 synthetic maintenance turn，还会要求可见 history 中同一个 reconstructed turn 同时存在 synthetic `userMessage` 和 synthetic `agentMessage`。
@@ -167,7 +168,9 @@ Codex 本地会话通常保存在：
 - 可选运行 `codex resume <session-id>` 做交互式检查。
 - 支持列出压缩备份；用户确认压缩结果正常后，用 `cleanup_compression_backups.py` 执行受保护的 dry-run / `--apply --yes` 删除。
 - 支持 dry-run 优先清理已完成 SubAgent：默认只允许 `thread_spawn_edges.status = closed` 的 root 子会话，并沿 `thread_spawn_edges` 自动展开清理整棵 spawned subtree，删除匹配的 `rollout-*.jsonl`、`*.jsonl.zst`、可选 `.orig` 备份、`session_index.jsonl` 记录和相关 SQLite 状态。正式清理默认会先备份所有被触碰文件；如果用户明确说不用备份，可用 `--no-cleanup-backup` 直接清理。
+- 支持“超时 SubAgent”判定：open/unknown 子会话如果 canonical SQLite 中父会话最后活跃时间比子会话最后活跃时间至少晚 `--timeout-hours`（默认 12 小时），可在用户明确要求“清理超时 SubAgent”时与 closed SubAgent 一起清理。
 - 清理会使用最新且实际提到 requested root 的 `state_*.sqlite` 作为 canonical cleanup source；其它 state DB 只做诊断，额外 descendants 会列为 stale candidates，不会静默进入 cleanup IDs。
+- 若 requested SubAgent 在多个 state DB 中出现 open/closed 等 spawn status 冲突，默认会拒绝；只有在 dry-run 已确认冲突来自过期 secondary state DB，且用户明确要求清理这些 SubAgent 时，才使用 `--allow-status-conflict`。
 - 清理时补齐 Codex `delete_threads_strict` 的 agent job 语义：如果 job runner 和 worker 都在 cleanup subtree，相关 pending/running `agent_jobs` 会标记为 `cancelled`，`agent_job_items.assigned_thread_id` 会清空。
 - `repair_rollout.py`、`verify_rollout.py`、`compress_session_by_id.py` 支持 `--json`，便于新 Agent 批量判断；`compress_session_by_id.py --verify-only` 可只做严格 semantic verification。
 
@@ -334,7 +337,11 @@ python scripts/cleanup_session_by_id.py <session-id> --apply --yes --no-cleanup-
 
 默认只允许清理能识别为 SubAgent 且 SQLite `thread_spawn_edges.status = closed` 的显式请求 root session。这个状态只能说明本地 spawn edge 生命周期已关闭，不能证明结论已经完整回到父会话，所以仍需人工确认 dry-run 计划。dry-run 会输出 `requested_session_ids`、`descendant_session_ids`、最终 `session_ids`、canonical state DB，以及 secondary state DB 中只作诊断的 stale descendant candidates；脚本会删除 cleanup IDs 对应的 active/archived rollout、`*.jsonl.zst` 压缩 sibling、`.jsonl.orig` 备份（除非使用 `--no-rollout-backups`）、`session_index.jsonl` 中的名称记录，以及本地 SQLite 中匹配该 thread id 的 `threads`、`thread_dynamic_tools`、`thread_spawn_edges`、`agent_jobs`、`agent_job_items`、`logs`、`thread_goals`、`stage1_outputs` 记录或引用；`agent_job_items.assigned_thread_id` 会被清空而不是删除 job 行。
 
+如果用户明确说“清理超时 SubAgent”，含义是清理 closed SubAgent，加上满足超时规则的 open/unknown SubAgent。超时规则为：在 canonical `state_*.sqlite.threads` 中，父会话最后活跃时间比子会话最后活跃时间至少晚 `--timeout-hours`，默认 12 小时。dry-run 的 `plan.sessions[*].timeout_subagent` 会列出 `parent_thread_id`、`parent_title`、子/父 last-active 时间和 `timeout_delta_hours`。执行这类清理时使用 `--allow-timeout-subagent --timeout-hours 12`，不要用 `--allow-open-subagent`；不满足超时规则的 open/unknown SubAgent 应继续被拒绝。
+
 如果多个 `state_*.sqlite` 对显式请求的 root session 报告冲突的 spawn edge 状态，例如同时出现 `closed` 和 `open`，dry-run 会拒绝清理并在 `refused_status_conflict` 中列出来源。正式 `--apply` 前还会检测是否有 Codex App 或 `codex` CLI 进程看起来正在使用目标 Codex home；默认拒绝，只有明确接受风险时才使用 `--allow-running-codex`。脚本会尽量读取进程环境里的 `CODEX_HOME`；未声明 home 的 Codex 进程按默认 `~/.codex` 处理。
+
+如果 dry-run 已经确认冲突来自过期 secondary state DB，而用户明确要求继续清理这些 SubAgent，可以追加 `--allow-status-conflict`。这个开关只解除状态冲突保护，不会把 secondary state DB 中额外看到的 descendants 加入实际 cleanup IDs。
 
 默认情况下，所有被删除或改写的文件会先备份到：
 
@@ -447,6 +454,9 @@ python scripts/cleanup_session_by_id.py --help
 - `--scan-meta`：当文件名不含 session ID 时，扫描 rollout 的 `session_meta.id`。
 - `--no-rollout-backups`：不删除 `*.jsonl.orig` / `*.jsonl.zst.orig` 这类 rollout 备份。
 - `--allow-open-subagent`：允许清理显式请求且 spawn edge 状态为 open 或 unknown 的 root SubAgent，仅在用户确认该子会话可丢时使用。descendants 会随允许的 root 一起清理。
+- `--allow-timeout-subagent`：允许清理 open/unknown 但已超时的 root SubAgent。超时判定使用 canonical SQLite thread 活跃时间：父会话至少比子会话晚活跃 `--timeout-hours`。
+- `--timeout-hours HOURS`：超时阈值，默认 `12`。仅配合 `--allow-timeout-subagent` 放行 open/unknown root SubAgent。
+- `--allow-status-conflict`：允许清理多个 state DB 对显式请求 root 的 spawn edge 状态互相冲突的 SubAgent；仅在 dry-run 已确认冲突来自 stale secondary state DB 且用户明确要求继续清理时使用。
 - `--allow-non-subagent`：允许删除显式请求但未识别为 SubAgent 的普通 root session，仅在用户明确要求时使用。
 - `--allow-running-codex`：允许在检测到目标 Codex home 可能仍被 Codex App / `codex` CLI 使用时执行清理，仅在用户明确接受风险时使用。
 - `--backup-root PATH`：清理备份目录，默认 `codex_home/backups`。
@@ -500,8 +510,8 @@ codex-session-compress/
 - 不要在未经用户确认的情况下删除备份；压缩备份清理使用 `cleanup_compression_backups.py`，并且正式删除必须显式使用 `--apply --yes`。
 - 清理 SubAgent 前必须先 dry-run；正式删除必须显式使用 `--apply --yes`。
 - 默认清理会创建 cleanup 备份；只有用户明确说不用备份或直接清理时，才可使用 `--no-cleanup-backup`。
-- 默认只清理 `thread_spawn_edges.status = closed` 的 root SubAgent，并自动清理其 spawned descendants；清理 open/unknown root 子会话必须获得用户明确要求，并使用 `--allow-open-subagent`。
-- 如果多个 state DB 对 root 的 spawn edge 状态互相冲突，不要强行清理；先人工确认本地状态。
+- 默认只清理 `thread_spawn_edges.status = closed` 的 root SubAgent，并自动清理其 spawned descendants；清理 open/unknown root 子会话必须获得用户明确要求，并使用 `--allow-timeout-subagent` 验证其为超时 SubAgent，或使用更强的 `--allow-open-subagent`。
+- 如果多个 state DB 对 root 的 spawn edge 状态互相冲突，不要强行清理；先人工确认本地状态。只有确认冲突来自 stale secondary state DB 且用户明确要求继续时，才使用 `--allow-status-conflict`。
 - cleanup tree 只来自 canonical state DB；secondary state DB 里的额外 descendants 只作为诊断候选。
 - 正式清理前默认要求目标 Codex home 未被 Codex 使用；不要随便使用 `--allow-running-codex`。
 - 清理普通 root session 前必须获得用户明确要求，并使用 `--allow-non-subagent`。

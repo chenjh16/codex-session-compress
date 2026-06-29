@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.8.22 - Unreleased
+
+- `cleanup_session_by_id.py` 新增 `--allow-timeout-subagent` 与 `--timeout-hours`（默认 12），用于用户明确要求清理“超时 SubAgent”时放行 open/unknown 但父会话最后活跃时间至少比子会话晚指定小时数的 root SubAgent。
+- cleanup dry-run 的 `plan.sessions[*]` 新增 `is_timeout_subagent` 与 `timeout_subagent`，包含 parent thread ID、parent title、child/parent last-active 时间、delta hours 和 canonical source DB，便于审计 open/unknown 子会话属于哪个父会话。
+- 文档和 Agent 指南同步“清理超时 SubAgent”语义：应清理 closed SubAgent 加 timed-out open/unknown SubAgent；未达超时阈值的 open/unknown SubAgent 仍保留，不能用 `--allow-open-subagent` 代替超时判定。
+- 全量文档同步当前 1.8.x 实现：补齐二次压缩旧 synthetic marker 省略规则、`--allow-status-conflict` 使用边界、SQLite sidecar 恢复说明和 direct cleanup 风险说明。
+- 合成测试新增 timed-out open SubAgent 放行和未超时 open SubAgent 继续拒绝的覆盖。
+- 版本号同步更新到 `1.8.22`。
+
+## 1.8.21 - Unreleased
+
+- `cleanup_session_by_id.py` 新增显式 `--allow-status-conflict`，用于用户已经明确要求清理对应 SubAgent，且 dry-run 说明 spawn status 冲突来自 stale secondary state DB 的场景；默认仍拒绝 conflicting roots。
+- README / SKILL 安全说明同步补充该开关的使用边界。
+- 版本号同步更新到 `1.8.21`。
+
+## 1.8.20 - Unreleased
+
+- `repair_rollout.py` 重新压缩已含旧 `codex-session-compress` synthetic marker 的 rollout 时，会从 checkpoint 前 breadcrumb 候选中省略这些旧 marker 事件，避免旧 3 事件 marker 或被拆碎的 marker fragment 触发当前四事件 synthetic maintenance turn 结构校验失败。
+- `repair_rollout.py --json` 新增 `historical_compression_marker_events_omitted`，便于诊断二次压缩时省略了多少旧压缩标记事件。
+- 合成测试新增旧版 checkpoint 前 compression marker 的二次压缩覆盖。
+- 版本号同步更新到 `1.8.20`。
+
 ## 1.8.19 - Unreleased
 
 - README 开头的核心能力说明补充：压缩可大幅降低磁盘空间占用，并减少 Codex App 打开大型会话时的内存消耗，同时保持后续 Agent 模型上下文无损。

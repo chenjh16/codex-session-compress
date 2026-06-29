@@ -211,6 +211,7 @@ semantic checkpoint strategy:
 - 如果 UI breadcrumb 后还有预算，旧 checkpoint 前的原始 `ResponseItem` 会从两端交替尽量保留，包括消息、reasoning、工具调用、工具输出和带图片的 response item；这些是历史 raw-detail breadcrumb，不会替代最新 full checkpoint 的 `replacement_history`。
 - 模型上下文尽量无损，因为保留了 Codex resume reconstruction 真正使用的 `replacement_history` 和完整 `rollout_suffix`。
 - elision marker 的唯一规范是显式 synthetic maintenance turn：`event_msg.task_started`、`event_msg.user_message`、`event_msg.agent_message`、`event_msg.task_complete`。它必须插在 checkpoint 前旧历史两端 breadcrumb 中间的真实截断位置，并且 synthetic `user_message.client_id` 必须使用 `codex-session-compress-elision-` 前缀。注入文案按操作系统语言选择，中文系统写中文，其它语言默认英文。因为 `EventMsg::UserMessage` 在源码中会作为 user turn boundary，验证器必须拒绝任何位于最新 full checkpoint 之后的 synthetic marker，并要求 synthetic maintenance turn 是完整连续的四事件结构；正常 resume 仍由最新 full checkpoint 的 `replacement_history` 和完整 `rollout_suffix` 驱动。
+- 二次压缩已经含有旧 `codex-session-compress` marker 的 rollout 时，checkpoint 前旧 marker 事件应从 breadcrumb 候选中省略；输出只保留本次压缩产生的当前四事件 synthetic maintenance turn，避免旧 marker fragment 干扰 App history reconstruction 或 verifier。
 - 压缩完成条件包括 Codex CLI/app-server confirmation：通过 `codex app-server --stdio` 的只读 `thread/read includeTurns=true` 确认压缩后的 rollout 能被 Codex 自己重建为 thread history，并且 synthetic maintenance turn 的 synthetic `userMessage` / `agentMessage` 已进入同一个可见 reconstructed turn。
 
 对目标 session，默认 `GOAL_SIZE=100MB` 时，mandatory segment 约 28.8MB，小于目标值，因此还可以在目标预算内额外保留少量历史 breadcrumb；如果只做纯 checkpoint cut，则文件约 28.8MB。

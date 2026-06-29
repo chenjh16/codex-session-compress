@@ -16,7 +16,7 @@ description: >-
   --apply --yes.
 license: MIT
 metadata:
-  version: 1.8.19
+  version: 1.8.22
 ---
 
 # Codex Session Compress
@@ -60,7 +60,8 @@ scripts/
 `confirm_session_with_codex_cli.py` implement the core semantic checkpoint
 compression, static verification, and Codex CLI thread-history confirmation
 flow. The additional wrappers add top-N listing, ID-based compression,
-confirmed compression-backup cleanup, and closed sub-agent cleanup workflows.
+confirmed compression-backup cleanup, closed/timed-out sub-agent cleanup, and
+cleanup restore workflows.
 
 ## List largest Codex JSONL sessions
 
@@ -142,8 +143,13 @@ SQLite `thread_spawn_edges.status` is `closed`. This is the strongest local
 lifecycle signal available in Codex state; it does not prove the child result
 has semantically returned to the parent, so the user must still confirm the
 dry-run plan. Use `--allow-open-subagent` only after confirming an open or
-unknown child is disposable. Use `--allow-non-subagent` only when the user
-explicitly wants to delete a normal thread.
+unknown child is disposable. Use `--allow-timeout-subagent --timeout-hours 12`
+for open/unknown sub-agents whose parent thread is at least 12 hours newer than
+the child according to canonical SQLite thread activity; these are called
+timed-out SubAgents. Use `--allow-status-conflict` only after confirming
+conflicting spawn statuses come from stale secondary state DB metadata and the
+requested sub-agent is still disposable. Use `--allow-non-subagent` only when
+the user explicitly wants to delete a normal thread.
 
 The cleanup plan covers:
 
@@ -287,6 +293,12 @@ Default compression is semantic-first:
    Chinese text, otherwise English is used. Because this synthetic user message is
    before the newest full checkpoint, active Codex resume history remains based
    on that checkpoint and the following suffix.
+
+When recompressing a rollout that already contains older
+`codex-session-compress` synthetic markers before the newest full checkpoint,
+those old marker events are omitted from the breadcrumb budget. The rewritten
+rollout emits one current four-event synthetic maintenance turn for the new
+physical elision instead of preserving stale or legacy marker fragments.
 
 The mandatory checkpoint segment is preserved even when it exceeds
 `GOAL_SIZE`. In that case the old pre-checkpoint history is reduced to the first
@@ -461,6 +473,22 @@ For finished sub-agent deletion:
 5. Report the backup manifest path when a backup was created, or clearly state
    that direct cleanup is irreversible. Always report SQLite integrity results.
 
+For timed-out SubAgent cleanup:
+
+1. Treat "清理超时 subagent" / "清理超时 SubAgent" as a request to clean both
+   closed SubAgents and timed-out open/unknown SubAgents.
+2. Gather current SubAgent IDs, then dry-run all of them with
+   `cleanup_session_by_id.py ... --allow-timeout-subagent --timeout-hours 12`.
+   Add `--allow-status-conflict` only when the dry-run shows conflicts from
+   stale secondary state DB metadata and the user has asked to clean these
+   SubAgents.
+3. Inspect `plan.sessions[*].is_timeout_subagent` and
+   `plan.sessions[*].timeout_subagent`: it reports parent thread ID, parent
+   title, child last-active time, parent last-active time, and delta hours.
+4. Apply cleanup only to the non-refused IDs from the dry-run. Do not use
+   `--allow-open-subagent` for timeout cleanup; open/unknown SubAgents that are
+   not timed out should remain refused.
+
 ## Safety rules
 
 - Never compress or repair a rollout without a backup.
@@ -470,7 +498,13 @@ For finished sub-agent deletion:
 - Never use `--no-cleanup-backup` unless the user explicitly asks for no backup
   or direct irreversible cleanup.
 - Never clean an open or unknown-state root sub-agent unless the user explicitly
-  asks and `--allow-open-subagent` is used.
+  asks and either `--allow-timeout-subagent` confirms it is timed out or
+  `--allow-open-subagent` is used.
+- Never classify an open/unknown root sub-agent as timed out unless the parent
+  thread's canonical SQLite last-active time is at least `--timeout-hours`
+  newer than the child thread's last-active time.
+- Never clean a root sub-agent with conflicting spawn statuses unless the user
+  explicitly asks and `--allow-status-conflict` is used.
 - Never clean a normal root session unless the user explicitly asks and
   `--allow-non-subagent` is used.
 - Never remove the newest `compacted` record.

@@ -113,6 +113,30 @@ def write_ui_breadcrumb_jsonl(path: Path, session_id: str = SESSION_ID) -> None:
     write_rollout_rows(path, rows)
 
 
+def write_legacy_compression_marker_jsonl(path: Path, session_id: str = SESSION_ID) -> None:
+    legacy_turn_id = "codex-session-compress-elision-legacy"
+    rows = [
+        {"type": "session_meta", "payload": {"id": session_id, "cwd": "/tmp/project"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "APP_VISIBLE_START", "images": [], "local_images": [], "text_elements": []}},
+        {"type": "event_msg", "payload": {"type": "agent_message", "message": "APP_VISIBLE_LEFT_AGENT"}},
+        {"type": "event_msg", "payload": {"type": "token_count", "blob": "x" * 50000, "message": "LARGE_UI_EVENT_SHOULD_DROP"}},
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": legacy_turn_id}},
+        {"type": "event_msg", "payload": {"type": "agent_message", "message": "[codex-session-compress: omitted old history before current marker]"}},
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": legacy_turn_id,
+                "last_agent_message": "[codex-session-compress: omitted old history before current marker]",
+            },
+        },
+        {"type": "event_msg", "payload": {"type": "agent_message", "message": "APP_VISIBLE_RIGHT_AGENT"}},
+        {"type": "compacted", "payload": {"message": "new", "replacement_history": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "summary anchor"}]}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "recent"}]}},
+    ]
+    write_rollout_rows(path, rows)
+
+
 def write_nonbreadcrumb_omission_jsonl(path: Path, session_id: str = SESSION_ID) -> None:
     rows = [
         {"type": "session_meta", "payload": {"id": session_id, "cwd": "/tmp/project"}},
@@ -440,6 +464,42 @@ def test_physical_precheckpoint_omission_gets_placeholder_even_without_breadcrum
         assert "codex-session-compress" in text
         assert "NON_BREADCRUMB_HISTORY_SHOULD_DROP" not in text
         verify = run([sys.executable, str(SCRIPTS / "verify_rollout.py"), str(rollout), "--semantic-checkpoint"])
+        assert verify.returncode == 0, verify.stderr + verify.stdout
+
+
+def test_repair_omits_existing_precheckpoint_compression_marker_events():
+    with tempfile.TemporaryDirectory() as tmp:
+        rollout = Path(tmp) / f"rollout-20260101T000000-{SESSION_ID}.jsonl"
+        write_legacy_compression_marker_jsonl(rollout)
+
+        repair = run(
+            [
+                sys.executable,
+                str(SCRIPTS / "repair_rollout.py"),
+                str(rollout),
+                "--goal-size",
+                "12KB",
+                "--json",
+            ]
+        )
+        assert repair.returncode == 0, repair.stderr + repair.stdout
+        plan = json.loads(repair.stdout)
+        assert plan["historical_compression_marker_events_omitted"] == 3
+
+        text = rollout.read_text(encoding="utf-8")
+        assert "codex-session-compress-elision-legacy" not in text
+        assert "[codex-session-compress: omitted old history" not in text
+
+        verify = run(
+            [
+                sys.executable,
+                str(SCRIPTS / "verify_rollout.py"),
+                str(rollout),
+                "--require-compacted",
+                "--require-full-compacted",
+                "--semantic-checkpoint",
+            ]
+        )
         assert verify.returncode == 0, verify.stderr + verify.stdout
 
 
@@ -938,6 +998,106 @@ def test_cleanup_session_by_id_removes_subagent_artifacts_only_after_apply():
         assert all(value == "ok" for value in restore_data["integrity"].values())
 
 
+def test_cleanup_allows_timed_out_open_subagent_only_with_explicit_flag():
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp) / "codex-home"
+        sessions = home / "sessions" / "2026" / "01" / "01"
+        sessions.mkdir(parents=True)
+        timed_out_rollout = sessions / f"rollout-2026-01-01T00-00-00-{OPEN_SUBAGENT_SESSION_ID}.jsonl"
+        recent_rollout = sessions / f"rollout-2026-01-01T00-00-01-{CHILD_SUBAGENT_SESSION_ID}.jsonl"
+        write_subagent_jsonl(timed_out_rollout, OPEN_SUBAGENT_SESSION_ID)
+        write_subagent_jsonl(recent_rollout, CHILD_SUBAGENT_SESSION_ID)
+
+        state_db = home / "state_6.sqlite"
+        conn = sqlite3.connect(str(state_db))
+        try:
+            conn.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, agent_nickname TEXT, agent_role TEXT, thread_source TEXT, source TEXT, updated_at_ms INTEGER, recency_at_ms INTEGER)"
+            )
+            conn.execute("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT, status TEXT)")
+            parent_ms = 1_800_000_000_000
+            timed_out_child_ms = parent_ms - 13 * 60 * 60 * 1000
+            recent_child_ms = parent_ms - 2 * 60 * 60 * 1000
+            conn.execute(
+                "INSERT INTO threads (id, title, thread_source, source, updated_at_ms, recency_at_ms) VALUES (?, ?, ?, ?, ?, ?)",
+                (FALLBACK_SESSION_ID, "Parent Work", "user", "vscode", parent_ms, parent_ms),
+            )
+            for sid, nickname, last_ms in (
+                (OPEN_SUBAGENT_SESSION_ID, "TimedOut", timed_out_child_ms),
+                (CHILD_SUBAGENT_SESSION_ID, "Recent", recent_child_ms),
+            ):
+                conn.execute(
+                    "INSERT INTO threads (id, title, agent_nickname, agent_role, thread_source, source, updated_at_ms, recency_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        sid,
+                        "Child prompt",
+                        nickname,
+                        "worker",
+                        "subagent",
+                        '{"subagent":{"thread_spawn":{"agent_nickname":"%s"}}}' % nickname,
+                        last_ms,
+                        last_ms,
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES (?, ?, ?)",
+                    (FALLBACK_SESSION_ID, sid, "open"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        refused = run(
+            [
+                sys.executable,
+                str(SCRIPTS / "cleanup_session_by_id.py"),
+                OPEN_SUBAGENT_SESSION_ID,
+                "--codex-home",
+                str(home),
+                "--json",
+            ]
+        )
+        assert refused.returncode == 1
+        refused_plan = json.loads(refused.stdout)["plan"]
+        assert refused_plan["refused_not_closed"] == [OPEN_SUBAGENT_SESSION_ID]
+        assert refused_plan["sessions"][OPEN_SUBAGENT_SESSION_ID]["is_timeout_subagent"] is True
+
+        allowed = run(
+            [
+                sys.executable,
+                str(SCRIPTS / "cleanup_session_by_id.py"),
+                OPEN_SUBAGENT_SESSION_ID,
+                "--codex-home",
+                str(home),
+                "--allow-timeout-subagent",
+                "--json",
+            ]
+        )
+        assert allowed.returncode == 0, allowed.stderr + allowed.stdout
+        allowed_plan = json.loads(allowed.stdout)["plan"]
+        timeout_info = allowed_plan["sessions"][OPEN_SUBAGENT_SESSION_ID]["timeout_subagent"]
+        assert allowed_plan["refused"] == []
+        assert timeout_info["parent_thread_id"] == FALLBACK_SESSION_ID
+        assert timeout_info["parent_title"] == "Parent Work"
+        assert timeout_info["timeout_delta_hours"] == 13.0
+
+        recent_refused = run(
+            [
+                sys.executable,
+                str(SCRIPTS / "cleanup_session_by_id.py"),
+                CHILD_SUBAGENT_SESSION_ID,
+                "--codex-home",
+                str(home),
+                "--allow-timeout-subagent",
+                "--json",
+            ]
+        )
+        assert recent_refused.returncode == 1
+        recent_plan = json.loads(recent_refused.stdout)["plan"]
+        assert recent_plan["sessions"][CHILD_SUBAGENT_SESSION_ID]["is_timeout_subagent"] is False
+        assert recent_plan["refused_not_closed"] == [CHILD_SUBAGENT_SESSION_ID]
+
+
 def test_cleanup_apply_refuses_running_codex_by_default():
     cleanup = load_cleanup_module()
     original = cleanup.running_codex_processes
@@ -1289,12 +1449,14 @@ if __name__ == "__main__":
     test_breadcrumb_preserves_original_response_items_within_goal()
     test_breadcrumb_preserves_app_visible_event_and_turn_context_items_first()
     test_physical_precheckpoint_omission_gets_placeholder_even_without_breadcrumb_candidates()
+    test_repair_omits_existing_precheckpoint_compression_marker_events()
     test_list_rollouts_can_show_app_titles()
     test_list_rollouts_explicit_base_controls_title_home_over_env_codex_home()
     test_repair_auto_json_is_machine_readable_without_banner_text()
     test_compress_session_verify_only_json()
     test_compress_session_reports_inferred_codex_home_for_base()
     test_cleanup_session_by_id_removes_subagent_artifacts_only_after_apply()
+    test_cleanup_allows_timed_out_open_subagent_only_with_explicit_flag()
     test_cleanup_apply_refuses_running_codex_by_default()
     test_cleanup_running_codex_process_filter_is_target_home_scoped()
     test_confirm_read_response_uses_queue_reader_path()

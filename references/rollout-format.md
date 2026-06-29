@@ -57,6 +57,8 @@ Codex 会话通常保存在：
 5. 用一个显式 synthetic maintenance turn 表示中间被截去的旧历史：依次写入 `event_msg.task_started`、`event_msg.user_message`、`event_msg.agent_message`、`event_msg.task_complete`，并把它放在 checkpoint 前旧历史两端 breadcrumb 中间的真实截断位置。synthetic `user_message.client_id` 使用 `codex-session-compress-elision-` 前缀；文案按操作系统语言选择中文或英文，并说明它是压缩工具写入的标记，不是原始用户指令。
 6. 如果没有 full checkpoint，停止并拒绝修改文件。
 
+二次压缩时，如果 checkpoint 前旧历史里已经有旧版或上一轮 `codex-session-compress` synthetic marker，这些 marker 事件不再作为 breadcrumb 候选保留。当前输出只写入一个新的、完整连续的四事件 synthetic maintenance turn，避免旧 marker fragment 被拆碎后影响 App 可见历史或 verifier 校验。
+
 ## 不变量
 
 - 必须保留 `session_meta.id`。
@@ -64,6 +66,7 @@ Codex 会话通常保存在：
 - 必须完整保留最新 full checkpoint 之后的 suffix。
 - latest full checkpoint 本行的 `replacement_history` 图片属于 checkpoint 基底，验证时允许保留。
 - synthetic maintenance turn 必须是完整连续的 `event_msg.task_started`、`event_msg.user_message`、`event_msg.agent_message`、`event_msg.task_complete` 四事件结构，并且必须位于最新 full checkpoint 之前。
+- 旧的 `codex-session-compress` synthetic marker 不能被当作普通历史 breadcrumb 继续保留；二次压缩结果应只包含本次物理 elision 对应的当前 marker。
 - 不要替换 active suffix 中的图片，除非用户明确接受语义损失。
 - 不要使用非 checkpoint 的旧 turn 裁剪。
 - 压缩后必须运行 `verify_rollout.py`。

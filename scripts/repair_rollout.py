@@ -93,6 +93,31 @@ def print_json(obj):
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
+def is_compression_marker_event(payload):
+    if not isinstance(payload, dict):
+        return False
+    turn_id = payload.get("turn_id")
+    if isinstance(turn_id, str) and turn_id.startswith(SYNTHETIC_TURN_ID_PREFIX):
+        return True
+    client_id = payload.get("client_id")
+    if isinstance(client_id, str) and client_id.startswith(SYNTHETIC_TURN_ID_PREFIX):
+        return True
+    text = payload.get("message")
+    if not isinstance(text, str):
+        text = payload.get("last_agent_message")
+    if not isinstance(text, str):
+        return False
+    text = text.strip()
+    marker_prefixes = (
+        "[codex-session-compress:",
+        "[codex-session-compress synthetic marker]",
+        "[codex-session-compress 合成标记]",
+        "codex-session-compress omitted ",
+        "codex-session-compress 已省略",
+    )
+    return any(text.startswith(prefix) for prefix in marker_prefixes)
+
+
 def scan(path):
     info = {
         "lines": 0,
@@ -109,6 +134,7 @@ def scan(path):
         "user_msg_lines": [],
         "event_user_msg_lines": [],
         "event_msg_lines": [],
+        "compression_marker_event_lines": [],
         "turn_context_lines": [],
         "response_item_lines": [],
         "line_bytes": [],
@@ -147,6 +173,8 @@ def scan(path):
             elif kind == "event_msg":
                 info["event_msg_lines"].append(index)
                 payload = obj.get("payload") or {}
+                if is_compression_marker_event(payload):
+                    info["compression_marker_event_lines"].append(index)
                 if payload.get("type") == "user_message":
                     info["event_user_msg_lines"].append(index)
             elif kind == "turn_context":
@@ -345,10 +373,11 @@ def build_semantic_checkpoint_plan(info, target_bytes):
             break
 
     first_history = None
+    compression_marker_event_lines = set(info.get("compression_marker_event_lines", []))
     pre_checkpoint_ui_lines = [
         index
         for index in (info.get("event_msg_lines", []) + info.get("turn_context_lines", []))
-        if index < checkpoint
+        if index < checkpoint and index not in compression_marker_event_lines
     ]
     if pre_checkpoint_ui_lines:
         first_history = min(pre_checkpoint_ui_lines)
@@ -361,7 +390,7 @@ def build_semantic_checkpoint_plan(info, target_bytes):
         ui_candidates = sorted(
             index
             for index in (info.get("event_msg_lines", []) + info.get("turn_context_lines", []))
-            if first_history <= index < checkpoint
+            if first_history <= index < checkpoint and index not in compression_marker_event_lines
         )
         response_candidates = [
             index
@@ -500,6 +529,13 @@ def build_semantic_checkpoint_plan(info, target_bytes):
         "response_candidate_count": len(response_candidates),
         "response_keep_count": len([index for index in optional_keep if index in response_candidates]),
         "response_omitted_count": len([index for index in response_candidates if index not in optional_keep]),
+        "compression_marker_event_omitted_count": len(
+            [
+                index
+                for index in compression_marker_event_lines
+                if index < checkpoint and index not in optional_keep
+            ]
+        ),
         "breadcrumb_omitted_count": len(breadcrumb_omitted),
         "historical_rollout_candidate_count": len(historical_indices),
         "omitted_count": len(omitted),
@@ -688,6 +724,7 @@ def main():
             "historical_response_items_kept": plan["response_keep_count"],
             "historical_response_items_candidates": plan["response_candidate_count"],
             "historical_response_items_omitted": plan["response_omitted_count"],
+            "historical_compression_marker_events_omitted": plan["compression_marker_event_omitted_count"],
             "omitted_bytes": plan["omitted_bytes"],
             "omitted_size": human(plan["omitted_bytes"]),
             "mode": plan["mode"],

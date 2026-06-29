@@ -91,6 +91,54 @@ def human(value: int) -> str:
     return f"{value}B"
 
 
+def parse_positive_hours(value: str) -> float:
+    try:
+        hours = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("timeout hours must be a positive number")
+    if hours <= 0:
+        raise argparse.ArgumentTypeError("timeout hours must be a positive number")
+    return hours
+
+
+def coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def epoch_ms_from_row(row: sqlite3.Row, column: str, is_ms: bool) -> Optional[int]:
+    if column not in row.keys():
+        return None
+    value = coerce_int(row[column])
+    if value is None or value <= 0:
+        return None
+    return value if is_ms else value * 1000
+
+
+def thread_last_active_ms(row: sqlite3.Row) -> Optional[int]:
+    candidates = [
+        epoch_ms_from_row(row, "recency_at_ms", True),
+        epoch_ms_from_row(row, "updated_at_ms", True),
+        epoch_ms_from_row(row, "recency_at", False),
+        epoch_ms_from_row(row, "updated_at", False),
+    ]
+    candidates = [value for value in candidates if value is not None]
+    return max(candidates) if candidates else None
+
+
+def iso_from_epoch_ms(value: Optional[int]) -> str:
+    if value is None:
+        return ""
+    try:
+        return datetime.fromtimestamp(value / 1000.0, timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
 def sqlite_uri(path: Path) -> str:
     return "file:" + quote(path.as_posix(), safe="/:") + "?mode=ro"
 
@@ -825,6 +873,164 @@ def sqlite_subagent_metadata(db_paths: Iterable[Path], ids: Sequence[str]) -> Di
     return meta
 
 
+def sqlite_thread_activity_metadata(db_path: Optional[Path], ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    if not db_path or not db_path.is_file() or not ids:
+        return out
+    tables = sqlite_tables_and_columns(db_path)
+    thread_columns = tables.get("threads", set())
+    wanted_columns = [
+        column
+        for column in (
+            "id",
+            "title",
+            "agent_nickname",
+            "agent_role",
+            "thread_source",
+            "updated_at",
+            "updated_at_ms",
+            "recency_at",
+            "recency_at_ms",
+        )
+        if column in thread_columns
+    ]
+    if "id" not in wanted_columns:
+        return out
+    try:
+        conn = sqlite3.connect(sqlite_uri(db_path), uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return out
+    try:
+        try:
+            rows = conn.execute(
+                f"SELECT {', '.join(wanted_columns)} FROM threads WHERE id IN ({placeholders(ids)})",
+                list(ids),
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        for row in rows:
+            sid = row["id"]
+            last_active_ms = thread_last_active_ms(row)
+            title = row["title"] if "title" in row.keys() and isinstance(row["title"], str) else ""
+            nickname = (
+                row["agent_nickname"]
+                if "agent_nickname" in row.keys() and isinstance(row["agent_nickname"], str)
+                else ""
+            )
+            out[sid] = {
+                "thread_id": sid,
+                "title": title,
+                "agent_nickname": nickname,
+                "last_active_ms": last_active_ms,
+                "last_active_at": iso_from_epoch_ms(last_active_ms),
+            }
+    finally:
+        conn.close()
+    return out
+
+
+def sqlite_timeout_subagent_metadata(db_path: Optional[Path], ids: Sequence[str], timeout_hours: float) -> Dict[str, Dict[str, Any]]:
+    meta: Dict[str, Dict[str, Any]] = {}
+    if not db_path or not db_path.is_file() or not ids:
+        return meta
+    tables = sqlite_tables_and_columns(db_path)
+    edge_columns = tables.get("thread_spawn_edges", set())
+    if not {"parent_thread_id", "child_thread_id"}.issubset(edge_columns):
+        return meta
+    wanted_edge_columns = [
+        column
+        for column in ("parent_thread_id", "child_thread_id", "status")
+        if column in edge_columns
+    ]
+    try:
+        conn = sqlite3.connect(sqlite_uri(db_path), uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return meta
+    edges: List[Dict[str, str]] = []
+    try:
+        try:
+            rows = conn.execute(
+                (
+                    f"SELECT {', '.join(wanted_edge_columns)} FROM thread_spawn_edges "
+                    f"WHERE child_thread_id IN ({placeholders(ids)})"
+                ),
+                list(ids),
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        for row in rows:
+            child_id = row["child_thread_id"] if isinstance(row["child_thread_id"], str) else ""
+            parent_id = row["parent_thread_id"] if isinstance(row["parent_thread_id"], str) else ""
+            if not child_id or not parent_id:
+                continue
+            status = row["status"] if "status" in row.keys() and row["status"] is not None else "unknown"
+            edges.append(
+                {
+                    "child_thread_id": child_id,
+                    "parent_thread_id": parent_id,
+                    "status": str(status),
+                }
+            )
+    finally:
+        conn.close()
+
+    parent_ids = sorted({edge["parent_thread_id"] for edge in edges})
+    activity = sqlite_thread_activity_metadata(db_path, sorted(set(ids) | set(parent_ids)))
+    timeout_ms = int(timeout_hours * 60 * 60 * 1000)
+    edges_by_child: Dict[str, List[Dict[str, str]]] = {}
+    for edge in edges:
+        edges_by_child.setdefault(edge["child_thread_id"], []).append(edge)
+
+    for sid in ids:
+        child_activity = activity.get(sid, {})
+        child_last_ms = child_activity.get("last_active_ms")
+        best: Dict[str, Any] = {
+            "timeout_hours": timeout_hours,
+            "timeout_ms": timeout_ms,
+            "timeout_source_db": str(db_path),
+            "is_timeout_subagent": False,
+            "timeout_delta_ms": None,
+            "timeout_delta_hours": None,
+            "subagent_last_active_ms": child_last_ms,
+            "subagent_last_active_at": child_activity.get("last_active_at", ""),
+            "parent_thread_id": "",
+            "parent_title": "",
+            "parent_last_active_ms": None,
+            "parent_last_active_at": "",
+            "canonical_spawn_edge_status": "",
+        }
+        for edge in edges_by_child.get(sid, []):
+            parent = activity.get(edge["parent_thread_id"], {})
+            parent_last_ms = parent.get("last_active_ms")
+            delta_ms = None
+            if isinstance(parent_last_ms, int) and isinstance(child_last_ms, int):
+                delta_ms = parent_last_ms - child_last_ms
+            if delta_ms is None:
+                current_better = best["timeout_delta_ms"] is None
+            else:
+                current_better = best["timeout_delta_ms"] is None or delta_ms > best["timeout_delta_ms"]
+            if current_better:
+                best.update(
+                    {
+                        "timeout_delta_ms": delta_ms,
+                        "timeout_delta_hours": round(delta_ms / 3600000.0, 3) if delta_ms is not None else None,
+                        "parent_thread_id": edge["parent_thread_id"],
+                        "parent_title": parent.get("title", ""),
+                        "parent_last_active_ms": parent_last_ms,
+                        "parent_last_active_at": parent.get("last_active_at", ""),
+                        "canonical_spawn_edge_status": edge["status"],
+                    }
+                )
+        best["is_timeout_subagent"] = (
+            isinstance(best.get("timeout_delta_ms"), int)
+            and best["timeout_delta_ms"] >= timeout_ms
+        )
+        meta[sid] = best
+    return meta
+
+
 def unique_existing_sidecars(paths: Iterable[Path]) -> List[Path]:
     out: List[Path] = []
     seen: Set[str] = set()
@@ -1064,6 +1270,7 @@ def build_plan(args: argparse.Namespace) -> Dict[str, Any]:
             file_meta.setdefault(sid, {}).update(meta)
 
     sqlite_meta = sqlite_subagent_metadata(state_dbs, ids)
+    timeout_meta = sqlite_timeout_subagent_metadata(canonical_state_db, ids, args.timeout_hours)
     session_index = codex_home / "session_index.jsonl"
 
     sessions: Dict[str, Dict[str, Any]] = {}
@@ -1077,8 +1284,10 @@ def build_plan(args: argparse.Namespace) -> Dict[str, Any]:
         spawn_edge_statuses = list(sqlite_info.get("spawn_edge_statuses") or [])
         spawn_edge_status_sources = list(sqlite_info.get("spawn_edge_status_sources") or [])
         parent_thread_ids = list(sqlite_info.get("parent_thread_ids") or [])
+        timeout_info = timeout_meta.get(sid, {})
         normalized_statuses = {str(status).lower() for status in spawn_edge_statuses}
         is_closed_subagent = is_subagent and "closed" in normalized_statuses
+        is_timeout_subagent = is_subagent and bool(timeout_info.get("is_timeout_subagent"))
         concrete_statuses = {status for status in normalized_statuses if status}
         has_status_conflict = len(concrete_statuses) > 1
         status_warning = ""
@@ -1094,6 +1303,8 @@ def build_plan(args: argparse.Namespace) -> Dict[str, Any]:
             "spawn_tree_roots": list(spawn_tree["descendant_roots"].get(sid, [])),
             "is_subagent": is_subagent,
             "is_closed_subagent": is_closed_subagent,
+            "is_timeout_subagent": is_timeout_subagent,
+            "timeout_subagent": timeout_info,
             "has_spawn_edge_status_conflict": has_status_conflict,
             "status_warning": status_warning,
             "spawn_edge_statuses": spawn_edge_statuses,
@@ -1115,12 +1326,13 @@ def build_plan(args: argparse.Namespace) -> Dict[str, Any]:
         if info.get("requested")
         and info.get("is_subagent")
         and not info.get("is_closed_subagent")
+        and not (args.allow_timeout_subagent and info.get("is_timeout_subagent"))
         and not args.allow_open_subagent
     ]
     refused_status_conflict = [
         sid
         for sid, info in sessions.items()
-        if info.get("requested") and info.get("has_spawn_edge_status_conflict")
+        if info.get("requested") and info.get("has_spawn_edge_status_conflict") and not args.allow_status_conflict
     ]
     refused = refused_not_subagent[:]
     for sid in refused_not_closed + refused_status_conflict:
@@ -1151,6 +1363,7 @@ def build_plan(args: argparse.Namespace) -> Dict[str, Any]:
         "spawn_tree_edges": list(spawn_tree["spawn_tree_edges"]),
         "stale_spawn_descendant_candidates": stale_descendant_candidates,
         "stale_spawn_tree_edges": stale_spawn_tree_edges,
+        "timeout_hours": args.timeout_hours,
         "sessions": sessions,
         "refused": refused,
         "refused_not_subagent": refused_not_subagent,
@@ -1185,6 +1398,11 @@ def print_plan(plan: Dict[str, Any]) -> None:
         if info.get("is_subagent"):
             statuses = info.get("spawn_edge_statuses") or ["unknown"]
             label += f", status={','.join(str(status) for status in statuses)}"
+            if info.get("is_timeout_subagent"):
+                timeout = info.get("timeout_subagent") or {}
+                label += ", TIMEOUT"
+                if timeout.get("timeout_delta_hours") is not None:
+                    label += f", parent-child-delta={timeout['timeout_delta_hours']}h"
         if info.get("has_spawn_edge_status_conflict"):
             label += ", STATUS-CONFLICT"
         if info.get("status_warning"):
@@ -1195,6 +1413,19 @@ def print_plan(plan: Dict[str, Any]) -> None:
         print(f"- {sid}: {label}{nickname}")
         if info.get("status_warning"):
             print(f"    warning: {info['status_warning']}")
+        timeout = info.get("timeout_subagent") or {}
+        if timeout.get("parent_thread_id"):
+            parent_title = f" ({timeout.get('parent_title')})" if timeout.get("parent_title") else ""
+            print(
+                "    parent: %s%s; child_last=%s; parent_last=%s; delta_hours=%s"
+                % (
+                    timeout.get("parent_thread_id"),
+                    parent_title,
+                    timeout.get("subagent_last_active_at") or "unknown",
+                    timeout.get("parent_last_active_at") or "unknown",
+                    timeout.get("timeout_delta_hours"),
+                )
+            )
     if plan.get("refused_not_subagent"):
         print("\nRefused by default because not confirmed as sub-agent:")
         for sid in plan["refused_not_subagent"]:
@@ -1204,7 +1435,7 @@ def print_plan(plan: Dict[str, Any]) -> None:
         print("\nRefused by default because sub-agent spawn edge is not closed:")
         for sid in plan["refused_not_closed"]:
             print(f"  - {sid}")
-        print("Use --allow-open-subagent only after confirming the child session is disposable.")
+        print("Use --allow-timeout-subagent for timed-out children, or --allow-open-subagent only after confirming the child session is disposable.")
     if plan.get("refused_status_conflict"):
         print("\nRefused because multiple state DBs report conflicting spawn edge statuses:")
         for sid in plan["refused_status_conflict"]:
@@ -1362,6 +1593,9 @@ def main() -> int:
     parser.add_argument("--no-rollout-backups", action="store_true", help="Do not remove rollout sidecar backups such as .jsonl.orig or .jsonl.zst.orig.")
     parser.add_argument("--allow-non-subagent", action="store_true", help="Allow deleting sessions not identified as sub-agent sessions.")
     parser.add_argument("--allow-open-subagent", action="store_true", help="Allow deleting sub-agent sessions whose spawn edge status is open or unknown.")
+    parser.add_argument("--allow-timeout-subagent", action="store_true", help="Allow deleting open/unknown sub-agent sessions when the parent thread is newer than the child by --timeout-hours.")
+    parser.add_argument("--timeout-hours", type=parse_positive_hours, default=12.0, help="Hours parent last-active must be newer than child last-active for --allow-timeout-subagent. Default: 12.")
+    parser.add_argument("--allow-status-conflict", action="store_true", help="Allow deleting requested sub-agent sessions whose spawn edge status conflicts across state DBs.")
     parser.add_argument("--backup-root", default=None, help="Directory for cleanup backups. Default: codex_home/backups.")
     parser.add_argument("--no-cleanup-backup", action="store_true", help="Irreversibly apply cleanup without copying files or SQLite DBs to codex_home/backups.")
     parser.add_argument("--vacuum", action="store_true", help="Run VACUUM on SQLite DBs after row deletion.")
