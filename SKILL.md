@@ -16,7 +16,7 @@ description: >-
   --apply --yes.
 license: MIT
 metadata:
-  version: 1.8.18
+  version: 1.8.19
 ---
 
 # Codex Session Compress

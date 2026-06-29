@@ -1,6 +1,6 @@
 [project]
 name = "codex-session-compress"
-version = "1.8.18"
+version = "1.8.19"
 description = "Portable skill and stdlib scripts for listing, compressing, and cleaning local Codex session rollout JSONL files."
 readme = "README.md"
 requires-python = ">=3.8"

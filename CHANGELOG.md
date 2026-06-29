@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.8.19 - Unreleased
+
+- README 开头的核心能力说明补充：压缩可大幅降低磁盘空间占用，并减少 Codex App 打开大型会话时的内存消耗，同时保持后续 Agent 模型上下文无损。
+- 版本号同步更新到 `1.8.19`。
+
 ## 1.8.18 - Unreleased
 
 - README 安装说明改为直接安装到 Agent 自身 skills 目录；手动安装以 Codex 为例，目标路径为 `${CODEX_HOME:-$HOME/.codex}/skills/codex-session-compress`。
