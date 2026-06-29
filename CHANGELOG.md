@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.18 - Unreleased
+
+- README 安装说明改为直接安装到 Agent 自身 skills 目录；手动安装以 Codex 为例，目标路径为 `${CODEX_HOME:-$HOME/.codex}/skills/codex-session-compress`。
+- README 移除先克隆到 `~/codex-session-compress` 再软链接的安装方式，避免把用户引导到 Agent skills 目录之外。
+- Agent + Prompt 自动安装说明同步为“在 skills 目录内 clone 或 git pull --ff-only”。
+- README 后续重复安装段落改为“运行环境”，避免出现两套安装方式。
+- 版本号同步更新到 `1.8.18`。
+
 ## 1.8.17 - Unreleased
 
 - README 顶部调整为 GitHub 风格：居中标题、英文副标题和 version / Python / license / stdlib-only badges。

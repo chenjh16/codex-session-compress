@@ -4,7 +4,7 @@
 
 **Shrink oversized Codex session JSONL files while preserving Agent resume context.**
 
-[![Version](https://img.shields.io/badge/version-1.8.17-blue.svg)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.8.18-blue.svg)](./CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.8%2B-3776AB.svg)](./pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Stdlib only](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey.svg)](./pyproject.toml)
@@ -17,27 +17,25 @@
 
 ## 安装
 
-### 手动安装
+### 手动安装（以 Codex 为例）
 
-推荐把源码克隆到一个固定目录，然后用软链接安装到 Codex skills 目录：
+直接克隆到当前 Codex 实例的 skills 目录：
 
 ```bash
-git clone https://github.com/chenjh16/codex-session-compress.git ~/codex-session-compress
-
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+SKILL_DIR="$CODEX_HOME_DIR/skills/codex-session-compress"
+
 mkdir -p "$CODEX_HOME_DIR/skills"
-ln -sfn "$HOME/codex-session-compress" "$CODEX_HOME_DIR/skills/codex-session-compress"
+git clone https://github.com/chenjh16/codex-session-compress.git "$SKILL_DIR"
 ```
 
-如果仓库已经存在，更新后重新链接即可：
+如果已经安装过，直接在 skills 目录内更新：
 
 ```bash
-cd ~/codex-session-compress
-git pull
-
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-mkdir -p "$CODEX_HOME_DIR/skills"
-ln -sfn "$PWD" "$CODEX_HOME_DIR/skills/codex-session-compress"
+SKILL_DIR="$CODEX_HOME_DIR/skills/codex-session-compress"
+
+git -C "$SKILL_DIR" pull --ff-only
 ```
 
 ### Agent + Prompt 自动安装
@@ -48,8 +46,8 @@ ln -sfn "$PWD" "$CODEX_HOME_DIR/skills/codex-session-compress"
 请将 https://github.com/chenjh16/codex-session-compress.git 安装为 Codex skill。
 
 要求：
-1. 克隆或更新仓库到 ~/codex-session-compress。
-2. 使用软链接安装到 ${CODEX_HOME:-~/.codex}/skills/codex-session-compress。
+1. 直接克隆或更新仓库到当前 Codex 实例的 skills 目录：${CODEX_HOME:-~/.codex}/skills/codex-session-compress。
+2. 如果该目录已存在且是 git 仓库，执行 git pull --ff-only；如果不存在，执行 git clone。
 3. 安装完成后读取 SKILL.md，确认 skill 名称为 codex-session-compress。
 4. 不要复制真实 session JSONL，不要修改 ~/.codex/sessions。
 ```
@@ -173,20 +171,7 @@ Codex 本地会话通常保存在：
 - 清理时补齐 Codex `delete_threads_strict` 的 agent job 语义：如果 job runner 和 worker 都在 cleanup subtree，相关 pending/running `agent_jobs` 会标记为 `cancelled`，`agent_job_items.assigned_thread_id` 会清空。
 - `repair_rollout.py`、`verify_rollout.py`、`compress_session_by_id.py` 支持 `--json`，便于新 Agent 批量判断；`compress_session_by_id.py --verify-only` 可只做严格 semantic verification。
 
-## 安装说明
-
-作为 skill 使用时，将整个目录放到你的 skills 目录，例如：
-
-```bash
-mkdir -p ~/.codex/skills
-git clone https://github.com/chenjh16/codex-session-compress.git ~/.codex/skills/codex-session-compress
-```
-
-如果希望后续方便开发和更新，推荐使用前文的软链接安装方式，而不是直接复制。也可以手动复制本目录到：
-
-```text
-~/.codex/skills/codex-session-compress
-```
+## 运行环境
 
 本项目仅依赖 Python 标准库，建议 Python 3.8+。
 
