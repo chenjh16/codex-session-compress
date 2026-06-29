@@ -1,15 +1,21 @@
+<div align="center">
+
 # codex-session-compress
+
+**Shrink oversized Codex session JSONL files while preserving Agent resume context.**
+
+[![Version](https://img.shields.io/badge/version-1.8.17-blue.svg)](./CHANGELOG.md)
+[![Python](https://img.shields.io/badge/python-3.8%2B-3776AB.svg)](./pyproject.toml)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+[![Stdlib only](https://img.shields.io/badge/dependencies-stdlib%20only-lightgrey.svg)](./pyproject.toml)
+
+</div>
 
 `codex-session-compress` 是一个用于管理本地 Codex 会话 JSONL 的 skill：找出最大的会话文件、压缩指定 session、验证压缩结果、清理已确认可用的备份，并可清理不再需要的已完成 SubAgent 会话。
 
 它最重要的能力是：在已有 Codex full compaction checkpoint 的会话里，尽量缩小 JSONL，同时无损保留后续 Agent 继续工作所需的模型上下文。也就是说，压缩后的当前 session 仍应能被 Codex 继续打开、继续 resume，并保持 Agent 续作所需的语义基底。
 
 ## 安装
-
-公开仓库：
-
-- HTTPS：`https://github.com/chenjh16/codex-session-compress.git`
-- SSH：`git@github.com:chenjh16/codex-session-compress.git`
 
 ### 手动安装
 

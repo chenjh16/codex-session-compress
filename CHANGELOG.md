@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.17 - Unreleased
+
+- README 顶部调整为 GitHub 风格：居中标题、英文副标题和 version / Python / license / stdlib-only badges。
+- README 移除单独的“公开仓库”链接段，安装命令中保留必要的 clone URL。
+- 版本号同步更新到 `1.8.17`。
+
 ## 1.8.16 - Unreleased
 
 - README 新增靠前的“安装”小节，提供手动软链接安装和 Agent + Prompt 自动安装两种方式，并使用准确公开仓库地址 `https://github.com/chenjh16/codex-session-compress.git`。
